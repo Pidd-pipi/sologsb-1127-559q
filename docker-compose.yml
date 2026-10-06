@@ -1,0 +1,13 @@
+name: gbaccessmap
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: ${COMPOSE_PROJECT_NAME:-gbaccessmap}-frontend:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-gbaccessmap}-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-21827}:80"
+    environment:
+      - TZ=Asia/Shanghai
