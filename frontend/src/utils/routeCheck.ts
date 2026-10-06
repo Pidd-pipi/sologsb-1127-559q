@@ -93,6 +93,7 @@ export function buildVerdict(
   return {
     routeName,
     passable: reasons.length === 0 && ordered.length > 0,
+    hasInvalidSegments: false,
     totalLength,
     totalObstacles,
     totalSteps,

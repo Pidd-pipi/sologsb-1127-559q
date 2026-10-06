@@ -7,6 +7,7 @@ import {
   NodeIndexOutlined,
   ToolOutlined,
   DatabaseOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { usePointStore } from '../stores/pointStore';
@@ -20,6 +21,7 @@ const MENU = [
   { key: '/routes', icon: <NodeIndexOutlined />, label: '通行路线' },
   { key: '/map', icon: <EnvironmentOutlined />, label: '设施地图' },
   { key: '/rectify', icon: <ToolOutlined />, label: '整改清单' },
+  { key: '/offline', icon: <SwapOutlined />, label: '离线核验包' },
 ];
 
 export default function AppLayout() {
@@ -28,12 +30,18 @@ export default function AppLayout() {
   const loadRoutes = useRouteStore((s) => s.load);
   const pointCount = usePointStore((s) => s.points.length);
   const inspectionCount = usePointStore((s) => s.inspections.length);
+  // 点位/核验经导入或录入变化后，路线段数据随之重拉（判定本身实时派生，旧全线结论不会残留）
+  const dataVersion = usePointStore((s) => s.dataVersion);
   const hasKey = Boolean((import.meta.env.VITE_AMAP_KEY || '').trim());
 
   useEffect(() => {
     void loadPoints();
     void loadRoutes();
   }, [loadPoints, loadRoutes]);
+
+  useEffect(() => {
+    if (dataVersion > 0) void loadRoutes();
+  }, [dataVersion, loadRoutes]);
 
   const selectedKey =
     MENU.map((m) => m.key)

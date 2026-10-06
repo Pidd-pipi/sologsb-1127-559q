@@ -3,8 +3,10 @@ import type { AccessPoint } from '../types/point';
 import type { Inspection } from '../types/inspection';
 import type { RouteSegment } from '../types/route';
 import type { RectifyPlan } from '../types/rectify';
+import type { AppliedOp, PackageRecord, SeenInspection, SyncEntity } from '../types/sync';
 import { addDays, makeId, todayStr, toPlain } from '../utils/format';
 import { judgeInspection } from '../utils/routeCheck';
+import { getDeviceId, withInitialSync } from '../sync/revision';
 
 export const DB_NAME = 'gbaccessmap-db';
 
@@ -13,12 +15,17 @@ export const DB_NAME = 'gbaccessmap-db';
  * v1 建 points / inspections
  * v2 加 routes 表与 pointId 索引
  * v3 加 rectifies 表，并为历史不合格核验补建整改条目
+ * v4 离线核验包：points/inspections/rectifies 增加修订元数据（rev/fieldRev/deviceId/syncedAt），
+ *    新增 stagedPackages（整包留待重试）/ appliedOps（应用幂等）/ seenInspections（核验只补一次）
  */
 class AccessMapDb extends Dexie {
-  points!: Table<AccessPoint, string>;
-  inspections!: Table<Inspection, string>;
+  points!: Table<SyncEntity<AccessPoint>, string>;
+  inspections!: Table<SyncEntity<Inspection>, string>;
   routes!: Table<RouteSegment, string>;
-  rectifies!: Table<RectifyPlan, string>;
+  rectifies!: Table<SyncEntity<RectifyPlan>, string>;
+  stagedPackages!: Table<PackageRecord, string>;
+  appliedOps!: Table<AppliedOp, string>;
+  seenInspections!: Table<SeenInspection, string>;
 
   constructor() {
     super(DB_NAME);
@@ -71,6 +78,33 @@ class AccessMapDb extends Dexie {
             createdAt: new Date().toISOString(),
           });
         }
+      });
+    this.version(4)
+      .stores({
+        points: 'id, code, facilityType, district, name',
+        inspections: 'id, pointId, date, conclusion',
+        routes: 'id, routeName, fromPointId, toPointId, order',
+        rectifies: 'id, pointId, status, deadline',
+        stagedPackages: 'id, exportId, status, kind, createdAt',
+        appliedOps: 'id, packageId, entityKind, entityId',
+        seenInspections: 'id, pointId, inspectionId, packageId',
+      })
+      .upgrade(async (tx) => {
+        // v4：为三类业务实体补初始修订元数据 rev=1 / fieldRev[*]=1
+        const deviceId = getDeviceId();
+        const now = new Date().toISOString();
+        const backfill = async (tableName: 'points' | 'inspections' | 'rectifies') => {
+          const table = tx.table(tableName);
+          const rows: Array<Record<string, unknown>> = await table.toArray();
+          for (const row of rows) {
+            if (typeof row.rev === 'number' && row.fieldRev) continue;
+            const synced = withInitialSync(row as { id: string } & Record<string, unknown>, deviceId, now);
+            await table.put(synced);
+          }
+        };
+        await backfill('points');
+        await backfill('inspections');
+        await backfill('rectifies');
       });
   }
 }
@@ -302,8 +336,11 @@ const SEED_ROUTES: SeedRoute[] = [
 function buildSeed() {
   const now = new Date().toISOString();
   const today = todayStr();
-  const points: AccessPoint[] = SEED_POINTS.map((p) => ({ ...p, createdAt: now, updatedAt: now }));
-  const inspections: Inspection[] = SEED_INSPECTIONS.map((s, i) => {
+  const deviceId = getDeviceId();
+  const points = SEED_POINTS.map((p) =>
+    withInitialSync({ ...p, createdAt: now, updatedAt: now }, deviceId, now),
+  );
+  const inspections = SEED_INSPECTIONS.map((s, i) => {
     const judged = judgeInspection({
       slope: s.slope,
       clearWidth: s.clearWidth,
@@ -311,20 +348,24 @@ function buildSeed() {
       tactileContinuous: s.tactileContinuous,
       occupied: s.occupied,
     });
-    return {
-      id: `ins-seed-${i + 1}`,
-      pointId: s.pointId,
-      date: s.date,
-      inspector: s.inspector,
-      slope: s.slope,
-      clearWidth: s.clearWidth,
-      hasHandrail: s.hasHandrail,
-      tactileContinuous: s.tactileContinuous,
-      occupied: s.occupied,
-      conclusion: judged.conclusion,
-      problem: s.problem,
-      createdAt: now,
-    };
+    return withInitialSync(
+      {
+        id: `ins-seed-${i + 1}`,
+        pointId: s.pointId,
+        date: s.date,
+        inspector: s.inspector,
+        slope: s.slope,
+        clearWidth: s.clearWidth,
+        hasHandrail: s.hasHandrail,
+        tactileContinuous: s.tactileContinuous,
+        occupied: s.occupied,
+        conclusion: judged.conclusion,
+        problem: s.problem,
+        createdAt: now,
+      },
+      deviceId,
+      now,
+    );
   });
   const routes: RouteSegment[] = [];
   SEED_ROUTES.forEach((r, ri) => {
@@ -344,7 +385,7 @@ function buildSeed() {
       });
     }
   });
-  const rectifies: RectifyPlan[] = [
+  const rectifies = ([
     {
       id: 'rct-seed-1',
       pointId: 'pt-1007',
@@ -385,7 +426,7 @@ function buildSeed() {
       status: '已整改',
       createdAt: now,
     },
-  ];
+  ] as RectifyPlan[]).map((r) => withInitialSync(r, deviceId, now));
   return { points, inspections, routes, rectifies };
 }
 

@@ -4,8 +4,10 @@ import type { AccessPoint } from '../types/point';
 import type { RouteSegment } from '../types/route';
 import { makeId, toPlain } from '../utils/format';
 import { judgeSegment, buildVerdict } from '../utils/routeCheck';
+import { deriveSegmentState } from '../utils/routeLive';
 import { segmentLength } from '../utils/geo';
 import type { RouteVerdict } from '../types/route';
+import { usePointStore } from './pointStore';
 
 /** 编辑中的路段（尚未落库） */
 export interface DraftSegment {
@@ -128,29 +130,47 @@ export const useRouteStore = create<RouteState>((set, get) => ({
 
   saveRoute: async () => {
     const { draftSegments, draftName } = get();
-    const rows: RouteSegment[] = draftSegments.map((seg) =>
-      toPlain({
+    const points = usePointStore.getState().points;
+    const inspections = usePointStore.getState().inspections;
+    const ctx = { points, inspections };
+    const rows: RouteSegment[] = draftSegments.map((seg) => {
+      const judge = judgeSegment(seg);
+      // 实时叠加端点最新核验结论与点位存在性，保存时即为当前真实状态
+      const liveState = deriveSegmentState(
+        {
+          id: 'draft',
+          routeName: draftName || '未命名路线',
+          fromPointId: seg.fromPointId,
+          toPointId: seg.toPointId,
+          length: seg.length,
+          obstacleCount: seg.obstacleCount,
+          stepCount: seg.stepCount,
+          curbHeight: seg.curbHeight,
+          wheelchairPassable: judge.passable,
+          order: seg.order,
+          createdAt: '',
+        },
+        ctx,
+      );
+      return toPlain({
         id: makeId('rts'),
         routeName: draftName || '未命名路线',
         fromPointId: seg.fromPointId,
         toPointId: seg.toPointId,
-        length: seg.length,
+        length: Math.round(liveState.derivedLength * 10) / 10,
         obstacleCount: seg.obstacleCount,
         stepCount: seg.stepCount,
         curbHeight: seg.curbHeight,
-        wheelchairPassable: judgeSegment(seg).passable,
+        wheelchairPassable: liveState.state === 'fresh',
+        validState: liveState.state,
+        invalidReason: liveState.state === 'invalid' ? liveState.reasons.join('；') : '',
         order: seg.order,
         createdAt: new Date().toISOString(),
-      }),
-    );
+      });
+    });
     if (!rows.length) return 0;
     await db.routes.bulkPut(rows);
-    const all = await db.routes.toArray();
-    set({
-      segments: all.sort((a, b) =>
-        a.routeName === b.routeName ? a.order - b.order : a.routeName.localeCompare(b.routeName),
-      ),
-    });
+    await get().load();
     return rows.length;
   },
 

@@ -23,11 +23,13 @@ import EmptyState from '../components/common/EmptyState';
 import { usePointStore } from '../stores/pointStore';
 import { useRouteStore, type DraftSegment } from '../stores/routeStore';
 import type { RouteSegment, RouteVerdict } from '../types/route';
-import { buildVerdict, judgeSegment, CURB_FAIL, CURB_PASS } from '../utils/routeCheck';
+import { judgeSegment, CURB_FAIL, CURB_PASS } from '../utils/routeCheck';
+import { buildLiveVerdict, deriveSegmentState } from '../utils/routeLive';
 
 export default function Routes() {
   const { message } = App.useApp();
   const points = usePointStore((s) => s.points);
+  const inspections = usePointStore((s) => s.inspections);
   const {
     segments,
     draftName,
@@ -179,7 +181,31 @@ export default function Routes() {
       title: '可轮椅通行',
       dataIndex: 'wheelchairPassable',
       width: 120,
-      render: (v: boolean) => <StatusBadge value={v ? '可通行' : '不可通行'} kind="route" />,
+      render: (_, row) => {
+        const live = deriveSegmentState(row, { points, inspections });
+        return (
+          <StatusBadge
+            value={live.state === 'fresh' ? '可通行' : '已失效'}
+            kind="route"
+          />
+        );
+      },
+    },
+    {
+      title: '实时状态',
+      width: 220,
+      render: (_, row) => {
+        const live = deriveSegmentState(row, { points, inspections });
+        return live.state === 'invalid' ? (
+          <Typography.Text type="danger" style={{ fontSize: 12 }} data-testid={`segment-invalid-${row.id}`}>
+            {live.reasons[0]}
+          </Typography.Text>
+        ) : (
+          <Typography.Text type="success" style={{ fontSize: 12 }}>
+            依据最新点位与核验有效
+          </Typography.Text>
+        );
+      },
     },
   ];
 
@@ -191,9 +217,9 @@ export default function Routes() {
       byName.set(s.routeName, list);
     }
     const rows: RouteVerdict[] = [];
-    byName.forEach((list, name) => rows.push(buildVerdict(name, list)));
+    byName.forEach((list, name) => rows.push(buildLiveVerdict(name, list, { points, inspections })));
     return rows;
-  }, [segments]);
+  }, [segments, points, inspections]);
 
   return (
     <div>
@@ -350,17 +376,50 @@ export default function Routes() {
             )}
           </Card>
 
-          <Card title="已编制路线判定" size="small" style={{ marginTop: 16 }}>
+          <Card
+            title={
+              <Space size={8}>
+                <span>已编制路线判定</span>
+                <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
+                  按最新点位与最新核验实时重算
+                </Typography.Text>
+              </Space>
+            }
+            size="small"
+            style={{ marginTop: 16 }}
+          >
             {savedVerdicts.length ? (
-              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
                 {savedVerdicts.map((v) => (
-                  <Space key={v.routeName} size={8} wrap>
-                    <StatusBadge value={v.passable ? '可通行' : '不可通行'} kind="route" />
-                    <Typography.Text>{v.routeName}</Typography.Text>
-                    <Tag>{v.totalLength} m</Tag>
-                    <Tag>台阶 {v.totalSteps}</Tag>
-                    <Tag>障碍 {v.totalObstacles}</Tag>
-                  </Space>
+                  <div key={v.routeName} data-testid={`saved-verdict-${v.routeName}`}>
+                    <Space size={8} wrap>
+                      <StatusBadge
+                        value={v.hasInvalidSegments ? '已失效' : v.passable ? '可通行' : '不可通行'}
+                        kind="route"
+                      />
+                      <Typography.Text>{v.routeName}</Typography.Text>
+                      <Tag>{v.totalLength} m</Tag>
+                      <Tag>台阶 {v.totalSteps}</Tag>
+                      <Tag>障碍 {v.totalObstacles}</Tag>
+                    </Space>
+                    {v.hasInvalidSegments ? (
+                      <Alert
+                        type="error"
+                        showIcon
+                        style={{ marginTop: 6 }}
+                        message="相关路段已失效，旧全线结论停止展示，请重算路线"
+                        description={
+                          <ul style={{ margin: 0, paddingInlineStart: 18 }}>
+                            {v.reasons.slice(0, 4).map((r) => (
+                              <li key={r} style={{ fontSize: 12 }}>
+                                {r}
+                              </li>
+                            ))}
+                          </ul>
+                        }
+                      />
+                    ) : null}
+                  </div>
                 ))}
               </Space>
             ) : (
