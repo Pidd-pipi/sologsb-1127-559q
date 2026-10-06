@@ -8,6 +8,8 @@ import {
   Divider,
   Form,
   Input,
+  InputNumber,
+  Modal,
   Row,
   Select,
   Space,
@@ -18,7 +20,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { PlusOutlined, SaveOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlusOutlined, SaveOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons';
 import { Link, useParams } from 'react-router-dom';
 import MapPanel from '../components/common/MapPanel';
 import MeasureInput from '../components/common/MeasureInput';
@@ -51,6 +53,7 @@ export default function PointDetail() {
   const loaded = usePointStore((s) => s.loaded);
   const addInspection = usePointStore((s) => s.addInspection);
   const addRectify = usePointStore((s) => s.addRectify);
+  const updatePoint = usePointStore((s) => s.updatePoint);
 
   const point = useMemo(() => points.find((p) => p.id === id), [points, id]);
   const history = useMemo(
@@ -77,6 +80,11 @@ export default function PointDetail() {
     problem: '',
   }));
   const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [savingPoint, setSavingPoint] = useState(false);
+  const [pointPatch, setPointPatch] = useState<{ name: string; lng: number; lat: number; location: string; maintainUnit: string }>(
+    { name: '', lng: 0, lat: 0, location: '', maintainUnit: '' },
+  );
 
   const judgement = useMemo(
     () =>
@@ -234,6 +242,22 @@ export default function PointDetail() {
           <Link to="/map">
             <Button>在地图中查看</Button>
           </Link>
+          <Button
+            icon={<EditOutlined />}
+            onClick={() => {
+              setPointPatch({
+                name: point.name,
+                lng: point.lng,
+                lat: point.lat,
+                location: point.location,
+                maintainUnit: point.maintainUnit,
+              });
+              setEditing(true);
+            }}
+            data-testid="edit-point"
+          >
+            本机修订点位
+          </Button>
           <Link to="/points/new">
             <Button type="primary" icon={<PlusOutlined />}>
               登记新点位
@@ -422,6 +446,76 @@ export default function PointDetail() {
           />
         )}
       </Card>
+
+      <Modal
+        title={`本机修订 · ${point.name}`}
+        open={editing}
+        onCancel={() => setEditing(false)}
+        confirmLoading={savingPoint}
+        onOk={async () => {
+          setSavingPoint(true);
+          try {
+            await updatePoint(point.id, {
+              name: pointPatch.name.trim() || point.name,
+              lng: Number(pointPatch.lng) || point.lng,
+              lat: Number(pointPatch.lat) || point.lat,
+              location: pointPatch.location.trim(),
+              maintainUnit: pointPatch.maintainUnit.trim() || point.maintainUnit,
+            });
+            message.success('本机修订已保存（修订号 +1），坐标变化会立即令相关路线段失效重算');
+            setEditing(false);
+          } catch (e) {
+            message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+          } finally {
+            setSavingPoint(false);
+          }
+        }}
+        okText="保存本机修订"
+        destroyOnClose
+      >
+        <Form layout="vertical">
+          <Form.Item label="点位名称">
+            <Input value={pointPatch.name} onChange={(e) => setPointPatch((c) => ({ ...c, name: e.target.value }))} />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="经度">
+                <InputNumber
+                  style={{ width: '100%' }}
+                  value={pointPatch.lng}
+                  step={0.000001}
+                  onChange={(v) => setPointPatch((c) => ({ ...c, lng: Number(v ?? 0) }))}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="纬度">
+                <InputNumber
+                  style={{ width: '100%' }}
+                  value={pointPatch.lat}
+                  step={0.000001}
+                  onChange={(v) => setPointPatch((c) => ({ ...c, lat: Number(v ?? 0) }))}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="所在道路或建筑">
+            <Input
+              value={pointPatch.location}
+              onChange={(e) => setPointPatch((c) => ({ ...c, location: e.target.value }))}
+            />
+          </Form.Item>
+          <Form.Item label="养护单位">
+            <Input
+              value={pointPatch.maintainUnit}
+              onChange={(e) => setPointPatch((c) => ({ ...c, maintainUnit: e.target.value }))}
+            />
+          </Form.Item>
+          <Typography.Text type="secondary" className="gb-muted">
+            每次保存修订号 +1；现场回传包按字段修订号与基线合并，晚到的一份不会覆盖本机修改。
+          </Typography.Text>
+        </Form>
+      </Modal>
     </div>
   );
 }

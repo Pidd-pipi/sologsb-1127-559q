@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "selftest": "node scripts/run-selftest.mjs",
     "preview": "vite preview --port 21827"
   },
   "dependencies": {

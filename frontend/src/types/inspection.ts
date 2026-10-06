@@ -8,8 +8,9 @@ export type OccupiedLevel = '无' | '临时占用' | '长期占用';
 
 export const OCCUPIED_LEVELS: OccupiedLevel[] = ['无', '临时占用', '长期占用'];
 
+import type { SyncedRecord } from './sync';
 /** 核验记录 */
-export interface Inspection {
+export interface Inspection extends SyncedRecord {
   id: string;
   pointId: string;
   /** 核验日期 YYYY-MM-DD */
@@ -30,4 +31,4 @@ export interface Inspection {
   createdAt: string;
 }
 
-export type InspectionDraft = Omit<Inspection, 'id' | 'createdAt'>;
+export type InspectionDraft = Omit<Inspection, 'id' | 'createdAt' | keyof SyncedRecord>;

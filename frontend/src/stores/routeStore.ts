@@ -3,7 +3,7 @@ import { db } from '../db';
 import type { AccessPoint } from '../types/point';
 import type { RouteSegment } from '../types/route';
 import { makeId, toPlain } from '../utils/format';
-import { judgeSegment, buildVerdict } from '../utils/routeCheck';
+import { judgeSegment, buildVerdict, recalcSegments } from '../utils/routeCheck';
 import { segmentLength } from '../utils/geo';
 import type { RouteVerdict } from '../types/route';
 
@@ -141,8 +141,40 @@ export const useRouteStore = create<RouteState>((set, get) => ({
         wheelchairPassable: judgeSegment(seg).passable,
         order: seg.order,
         createdAt: new Date().toISOString(),
+        rev: 1,
+        fieldRevs: {},
+        syncBase: null,
+        state: '有效' as const,
+        stateReason: '',
+        rebuiltAt: new Date().toISOString(),
       }),
     );
+    // 保存时按当前端点最新核验结论做一次门控：新建路线不得与已知不合格结论矛盾
+    const [allPoints, allInspections] = await Promise.all([
+      db.points.toArray(),
+      db.inspections.toArray(),
+    ]);
+    const gate = recalcSegments(
+      rows.map((r) => ({
+        id: r.id,
+        routeName: r.routeName,
+        fromPointId: r.fromPointId,
+        toPointId: r.toPointId,
+        length: r.length,
+        obstacleCount: r.obstacleCount,
+        stepCount: r.stepCount,
+        curbHeight: r.curbHeight,
+        order: r.order,
+      })),
+      allPoints,
+      allInspections,
+    );
+    const gateMap = new Map(gate.map((g) => [g.id, g]));
+    rows.forEach((r) => {
+      const g = gateMap.get(r.id);
+      if (g) r.wheelchairPassable = g.wheelchairPassable;
+    });
+
     if (!rows.length) return 0;
     await db.routes.bulkPut(rows);
     const all = await db.routes.toArray();

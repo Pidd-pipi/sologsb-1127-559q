@@ -17,17 +17,20 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DeleteOutlined, NodeIndexOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { DeleteOutlined, NodeIndexOutlined, SaveOutlined, ThunderboltOutlined, ReloadOutlined } from '@ant-design/icons';
 import StatusBadge from '../components/common/StatusBadge';
 import EmptyState from '../components/common/EmptyState';
 import { usePointStore } from '../stores/pointStore';
 import { useRouteStore, type DraftSegment } from '../stores/routeStore';
-import type { RouteSegment, RouteVerdict } from '../types/route';
-import { buildVerdict, judgeSegment, CURB_FAIL, CURB_PASS } from '../utils/routeCheck';
+import type { RouteSegment } from '../types/route';
+import { buildRouteVerdicts, judgeSegment, CURB_FAIL, CURB_PASS } from '../utils/routeCheck';
+import { invalidateAndRebuild } from '../sync/syncService';
 
 export default function Routes() {
   const { message } = App.useApp();
   const points = usePointStore((s) => s.points);
+  const inspections = usePointStore((s) => s.inspections);
+  const loadRoutes = useRouteStore((s) => s.load);
   const {
     segments,
     draftName,
@@ -44,6 +47,7 @@ export default function Routes() {
     resetDraft,
   } = useRouteStore();
   const [saving, setSaving] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
 
   const pointOptions = useMemo(
     () => points.map((p) => ({ value: p.id, label: `${p.code} ${p.name}` })),
@@ -179,21 +183,51 @@ export default function Routes() {
       title: '可轮椅通行',
       dataIndex: 'wheelchairPassable',
       width: 120,
-      render: (v: boolean) => <StatusBadge value={v ? '可通行' : '不可通行'} kind="route" />,
+      render: (v: boolean, row) =>
+        row.state === '失效' ? (
+          <StatusBadge value="不可通行" kind="route" />
+        ) : (
+          <StatusBadge value={v ? '可通行' : '不可通行'} kind="route" />
+        ),
+    },
+    {
+      title: '状态',
+      dataIndex: 'state',
+      width: 90,
+      render: (v: string) =>
+        v === '失效' ? <Tag color="error">已失效</Tag> : <Tag color="success">有效</Tag>,
+    },
+    {
+      title: '失效原因',
+      dataIndex: 'stateReason',
+      ellipsis: true,
+      render: (v: string) => v || <Typography.Text type="secondary">—</Typography.Text>,
     },
   ];
 
+  /** 已保存路线的全线判定：始终按当前点位与最新核验结论实时计算，失效路线不显示旧结论 */
   const savedVerdicts = useMemo(() => {
-    const byName = new Map<string, RouteSegment[]>();
-    for (const s of segments) {
-      const list = byName.get(s.routeName) ?? [];
-      list.push(s);
-      byName.set(s.routeName, list);
+    const map = buildRouteVerdicts(segments, points, inspections);
+    return [...map.values()];
+  }, [segments, points, inspections]);
+
+  const invalidSegmentCount = segments.filter((s) => s.state === '失效').length;
+
+  const handleRebuild = async () => {
+    setRebuilding(true);
+    try {
+      const affected = new Set(
+        segments.flatMap((s) => (s.state === '失效' ? [s.fromPointId, s.toPointId] : [])),
+      );
+      const n = await invalidateAndRebuild(affected);
+      await loadRoutes();
+      message.success(n ? `已重算 ${n} 个相关路线段` : '没有需要重算的路段');
+    } catch (e) {
+      message.error(`重算失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRebuilding(false);
     }
-    const rows: RouteVerdict[] = [];
-    byName.forEach((list, name) => rows.push(buildVerdict(name, list)));
-    return rows;
-  }, [segments]);
+  };
 
   return (
     <div>
@@ -350,18 +384,71 @@ export default function Routes() {
             )}
           </Card>
 
-          <Card title="已编制路线判定" size="small" style={{ marginTop: 16 }}>
+          <Card
+            title="已编制路线判定"
+            size="small"
+            style={{ marginTop: 16 }}
+            extra={
+              <Space size={4}>
+                {invalidSegmentCount > 0 ? <Tag color="error">{invalidSegmentCount} 段失效</Tag> : null}
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  loading={rebuilding}
+                  onClick={handleRebuild}
+                  data-testid="rebuild-routes"
+                >
+                  立即重算
+                </Button>
+              </Space>
+            }
+          >
+            {invalidSegmentCount > 0 ? (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message="最新核验结论或点位发生变化，相关路线段已立即失效，旧全线结论不再显示"
+                description="点击「立即重算」按最新点位与核验结论重新判定；缺少端点点位的路段补齐点位后才可重算。"
+              />
+            ) : null}
             {savedVerdicts.length ? (
               <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                {savedVerdicts.map((v) => (
-                  <Space key={v.routeName} size={8} wrap>
-                    <StatusBadge value={v.passable ? '可通行' : '不可通行'} kind="route" />
-                    <Typography.Text>{v.routeName}</Typography.Text>
-                    <Tag>{v.totalLength} m</Tag>
-                    <Tag>台阶 {v.totalSteps}</Tag>
-                    <Tag>障碍 {v.totalObstacles}</Tag>
-                  </Space>
-                ))}
+                {savedVerdicts.map((v) =>
+                  v.valid ? (
+                    <div key={v.routeName}>
+                      <Space size={8} wrap>
+                        <StatusBadge value={v.passable ? '可通行' : '不可通行'} kind="route" />
+                        <Typography.Text>{v.routeName}</Typography.Text>
+                        <Tag>{v.totalLength} m</Tag>
+                        <Tag>台阶 {v.totalSteps}</Tag>
+                        <Tag>障碍 {v.totalObstacles}</Tag>
+                      </Space>
+                      {v.gateNotes.length ? (
+                        <div style={{ marginTop: 2 }}>
+                          {v.gateNotes.map((g) => (
+                            <Tag key={g} color="warning">
+                              {g}
+                            </Tag>
+                          ))}
+                        </div>
+                      ) : null}
+                      {!v.passable && v.reasons.length ? (
+                        <Typography.Paragraph type="warning" style={{ marginTop: 4, marginBottom: 0 }}>
+                          {v.reasons.join('；')}
+                        </Typography.Paragraph>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <Alert
+                      key={v.routeName}
+                      type="error"
+                      showIcon
+                      message={`路线「${v.routeName}」已失效（${v.invalidCount} 段）`}
+                      description="端点点位或最新核验结论已变化，旧全线结论不能继续显示，请立即重算。"
+                    />
+                  ),
+                )}
               </Space>
             ) : (
               <EmptyState title="暂无已保存路线" compact />

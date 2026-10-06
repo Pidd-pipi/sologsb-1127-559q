@@ -3,8 +3,10 @@ export type RectifyStatus = '待整改' | '已整改' | '复发';
 
 export const RECTIFY_STATUSES: RectifyStatus[] = ['待整改', '已整改', '复发'];
 
+import type { SyncedRecord } from './sync';
+
 /** 整改跟踪条目 */
-export interface RectifyPlan {
+export interface RectifyPlan extends SyncedRecord {
   id: string;
   pointId: string;
   /** 整改要求 */
@@ -19,7 +21,7 @@ export interface RectifyPlan {
   createdAt: string;
 }
 
-export type RectifyPlanDraft = Omit<RectifyPlan, 'id' | 'createdAt'>;
+export type RectifyPlanDraft = Omit<RectifyPlan, 'id' | 'createdAt' | keyof SyncedRecord>;
 
 /** 按状态与期限分组后的清单结构 */
 export interface RectifyGroup {

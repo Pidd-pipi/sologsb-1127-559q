@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Layout, Menu, Space, Tag, Typography } from 'antd';
+import { Layout, Menu, Space, Tag, Typography, Badge } from 'antd';
 import {
   HomeOutlined,
   PlusCircleOutlined,
@@ -7,10 +7,12 @@ import {
   NodeIndexOutlined,
   ToolOutlined,
   DatabaseOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { usePointStore } from '../stores/pointStore';
 import { useRouteStore } from '../stores/routeStore';
+import { useSyncInbox } from '../hooks/useSyncInbox';
 
 const { Sider, Content, Header } = Layout;
 
@@ -20,6 +22,7 @@ const MENU = [
   { key: '/routes', icon: <NodeIndexOutlined />, label: '通行路线' },
   { key: '/map', icon: <EnvironmentOutlined />, label: '设施地图' },
   { key: '/rectify', icon: <ToolOutlined />, label: '整改清单' },
+  { key: '/sync', icon: <SwapOutlined />, label: '离线核验包' },
 ];
 
 export default function AppLayout() {
@@ -28,6 +31,8 @@ export default function AppLayout() {
   const loadRoutes = useRouteStore((s) => s.load);
   const pointCount = usePointStore((s) => s.points.length);
   const inspectionCount = usePointStore((s) => s.inspections.length);
+  const { inbox } = useSyncInbox();
+  const pendingInbound = inbox.filter((i) => i.status === '待重试' || i.status === '待裁决').length;
   const hasKey = Boolean((import.meta.env.VITE_AMAP_KEY || '').trim());
 
   useEffect(() => {
@@ -57,7 +62,11 @@ export default function AppLayout() {
           items={MENU.map((m) => ({
             key: m.key,
             icon: m.icon,
-            label: <Link to={m.key}>{m.label}</Link>,
+            label: (
+              <Badge count={m.key === '/sync' ? pendingInbound : 0} size="small" offset={[16, -2]}>
+                <Link to={m.key}>{m.label}</Link>
+              </Badge>
+            ),
           }))}
         />
       </Sider>

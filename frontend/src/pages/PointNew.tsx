@@ -115,6 +115,9 @@ export default function PointNew() {
       maintainUnit: draft.maintainUnit,
       createdAt: '',
       updatedAt: '',
+      rev: 1,
+      fieldRevs: {},
+      syncBase: null,
     };
     return [self, ...points];
   }, [draft, points]);

@@ -1,8 +1,9 @@
 import Dexie, { type Table } from 'dexie';
-import type { AccessPoint } from '../types/point';
+import type { AccessPoint, AccessPointDraft } from '../types/point';
 import type { Inspection } from '../types/inspection';
 import type { RouteSegment } from '../types/route';
 import type { RectifyPlan } from '../types/rectify';
+import type { InboundPackage, SyncLedgerEntry } from '../types/sync';
 import { addDays, makeId, todayStr, toPlain } from '../utils/format';
 import { judgeInspection } from '../utils/routeCheck';
 
@@ -13,12 +14,16 @@ export const DB_NAME = 'gbaccessmap-db';
  * v1 建 points / inspections
  * v2 加 routes 表与 pointId 索引
  * v3 加 rectifies 表，并为历史不合格核验补建整改条目
+ * v4 加 inbound / ledger 表（离线核验包收件箱与幂等台账），
+ *    历史实体补 rev / fieldRevs / syncBase，历史路线段补 state / stateReason / rebuiltAt
  */
 class AccessMapDb extends Dexie {
   points!: Table<AccessPoint, string>;
   inspections!: Table<Inspection, string>;
   routes!: Table<RouteSegment, string>;
   rectifies!: Table<RectifyPlan, string>;
+  inbound!: Table<InboundPackage, string>;
+  ledger!: Table<SyncLedgerEntry, string>;
 
   constructor() {
     super(DB_NAME);
@@ -72,12 +77,49 @@ class AccessMapDb extends Dexie {
           });
         }
       });
+    this.version(4)
+      .stores({
+        points: 'id, code, facilityType, district, name',
+        inspections: 'id, pointId, date, conclusion',
+        routes: 'id, routeName, fromPointId, toPointId, order, state',
+        rectifies: 'id, pointId, status, deadline',
+        inbound: 'id, status, updatedAt',
+        ledger: 'id, appliedAt',
+      })
+      .upgrade(async (tx) => {
+        // 历史实体补齐同步元信息（修订号从 1 起，无逐字段修订历史，基线留空）
+        for (const name of ['points', 'inspections', 'rectifies'] as const) {
+          const table = tx.table(name);
+          const rows: Array<{ id: string; rev?: number; fieldRevs?: Record<string, number> }> =
+            await table.toArray();
+          for (const row of rows) {
+            await table.update(row.id, {
+              rev: row.rev ?? 1,
+              fieldRevs: row.fieldRevs ?? {},
+              syncBase: null,
+            });
+          }
+        }
+        // 历史路线段默认有效（旧结论保留一次，随后按需失效）
+        const routes = tx.table('routes');
+        const routeRows: RouteSegment[] = await routes.toArray();
+        for (const row of routeRows) {
+          await routes.update(row.id, {
+            rev: row.rev ?? 1,
+            fieldRevs: row.fieldRevs ?? {},
+            syncBase: null,
+            state: row.state ?? '有效',
+            stateReason: row.stateReason ?? '',
+            rebuiltAt: row.rebuiltAt ?? row.createdAt,
+          });
+        }
+      });
   }
 }
 
 export const db = new AccessMapDb();
 
-const SEED_POINTS: Omit<AccessPoint, 'createdAt' | 'updatedAt'>[] = [
+const SEED_POINTS: Array<AccessPointDraft & { id: string }> = [
   {
     id: 'pt-1001',
     code: 'WZ-2024-001',
@@ -299,10 +341,23 @@ const SEED_ROUTES: SeedRoute[] = [
   },
 ];
 
-function buildSeed() {
+function withSyncMeta<T extends Record<string, unknown>>(
+  entity: T,
+): T & { rev: number; fieldRevs: Record<string, number>; syncBase: null } {
+  return { ...entity, rev: 1, fieldRevs: {}, syncBase: null };
+}
+
+function buildSeed(): {
+  points: AccessPoint[];
+  inspections: Inspection[];
+  routes: RouteSegment[];
+  rectifies: RectifyPlan[];
+} {
   const now = new Date().toISOString();
   const today = todayStr();
-  const points: AccessPoint[] = SEED_POINTS.map((p) => ({ ...p, createdAt: now, updatedAt: now }));
+  const points = SEED_POINTS.map((p) =>
+    withSyncMeta({ ...p, createdAt: now, updatedAt: now }),
+  );
   const inspections: Inspection[] = SEED_INSPECTIONS.map((s, i) => {
     const judged = judgeInspection({
       slope: s.slope,
@@ -311,7 +366,7 @@ function buildSeed() {
       tactileContinuous: s.tactileContinuous,
       occupied: s.occupied,
     });
-    return {
+    return withSyncMeta({
       id: `ins-seed-${i + 1}`,
       pointId: s.pointId,
       date: s.date,
@@ -324,67 +379,72 @@ function buildSeed() {
       conclusion: judged.conclusion,
       problem: s.problem,
       createdAt: now,
-    };
+    });
   });
   const routes: RouteSegment[] = [];
   SEED_ROUTES.forEach((r, ri) => {
     for (let i = 1; i < r.pointIds.length; i += 1) {
-      routes.push({
-        id: `rts-seed-${ri + 1}-${i}`,
-        routeName: r.routeName,
-        fromPointId: r.pointIds[i - 1],
-        toPointId: r.pointIds[i],
-        length: Math.round((r.length / (r.pointIds.length - 1)) * 10) / 10,
-        obstacleCount: r.obstacleCount,
-        stepCount: r.stepCount,
-        curbHeight: r.curbHeight,
-        wheelchairPassable: r.stepCount === 0 && r.curbHeight <= 3 && r.obstacleCount <= 2,
-        order: i,
-        createdAt: now,
-      });
+      routes.push(
+        withSyncMeta({
+          id: `rts-seed-${ri + 1}-${i}`,
+          routeName: r.routeName,
+          fromPointId: r.pointIds[i - 1],
+          toPointId: r.pointIds[i],
+          length: Math.round((r.length / (r.pointIds.length - 1)) * 10) / 10,
+          obstacleCount: r.obstacleCount,
+          stepCount: r.stepCount,
+          curbHeight: r.curbHeight,
+          wheelchairPassable: r.stepCount === 0 && r.curbHeight <= 3 && r.obstacleCount <= 2,
+          order: i,
+          createdAt: now,
+          state: '有效' as const,
+          stateReason: '',
+          rebuiltAt: now,
+        }),
+      );
     }
   });
   const rectifies: RectifyPlan[] = [
-    {
+    withSyncMeta({
       id: 'rct-seed-1',
       pointId: 'pt-1007',
       requirement: '清退盲道上的商铺货架，重做坡道并加装扶手，复测净宽不低于 120cm',
       unit: '市政道路养护一所',
       deadline: addDays(today, -21),
       recheckDate: '',
-      status: '待整改',
+      status: '待整改' as const,
       createdAt: now,
-    },
-    {
+    }),
+    withSyncMeta({
       id: 'rct-seed-2',
       pointId: 'pt-1002',
       requirement: '补齐路口断开的盲道并增设提示盲道',
       unit: '市政道路养护二所',
       deadline: addDays(today, -6),
       recheckDate: '',
-      status: '待整改',
+      status: '待整改' as const,
       createdAt: now,
-    },
-    {
+    }),
+    withSyncMeta({
       id: 'rct-seed-3',
       pointId: 'pt-1004',
       requirement: '划设共享单车禁停区，恢复坡道净宽至 120cm 以上',
       unit: '园林绿化服务中心',
       deadline: addDays(today, 18),
       recheckDate: '',
-      status: '待整改',
+      status: '待整改' as const,
       createdAt: now,
-    },
-    {
+    }),
+    withSyncMeta({
       id: 'rct-seed-4',
       pointId: 'pt-1008',
       requirement: '更换电梯轿厢呼叫按钮盲文标识',
       unit: '轨道交通运营部',
       deadline: addDays(today, -40),
       recheckDate: addDays(today, -12),
-      status: '已整改',
+      status: '已整改' as const,
       createdAt: now,
-    },
+    }),
   ];
   return { points, inspections, routes, rectifies };
 }
@@ -394,12 +454,16 @@ export async function ensureSeed(): Promise<void> {
   const count = await db.points.count();
   if (count > 0) return;
   const seed = toPlain(buildSeed());
-  await db.transaction('rw', db.points, db.inspections, db.routes, db.rectifies, async () => {
-    await db.points.bulkPut(seed.points);
-    await db.inspections.bulkPut(seed.inspections);
-    await db.routes.bulkPut(seed.routes);
-    await db.rectifies.bulkPut(seed.rectifies);
-  });
+  await db.transaction(
+    'rw',
+    [db.points, db.inspections, db.routes, db.rectifies, db.inbound, db.ledger],
+    async () => {
+      await db.points.bulkPut(seed.points);
+      await db.inspections.bulkPut(seed.inspections);
+      await db.routes.bulkPut(seed.routes);
+      await db.rectifies.bulkPut(seed.rectifies);
+    },
+  );
 }
 
 export { makeId };

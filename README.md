@@ -40,6 +40,7 @@ docker compose down
 | `/routes` | 通行路线编制：选点自动串联路段，逐段填障碍数/台阶数/路缘高差，输出全线判定 | RouteSegment / AccessPoint |
 | `/map` | 设施地图：按设施类型着色渲染点位，点选弹出核验摘要 | AccessPoint / Inspection |
 | `/rectify` | 整改清单：按状态与期限分组、逾期置顶，登记复检结果 | RectifyPlan / AccessPoint |
+| `/sync` | 离线核验包：选中点位导出、回传导入、逐修订号字段合并与冲突并排裁决 | 四个模型 + InboundPackage / SyncLedger |
 
 ## 数据模型（`src/types/` 独立文件）
 
@@ -55,7 +56,8 @@ docker compose down
 - **IndexedDB（Dexie，库名 `gbaccessmap-db`）**：业务数据。含版本号与升级迁移：
   - `v1` 建 `points` / `inspections` 表；
   - `v2` 增加 `routes` 表与 `pointId` 相关索引；
-  - `v3` 增加 `rectifies` 表，并为历史「不合格」核验补建整改条目。
+  - `v3` 增加 `rectifies` 表，并为历史「不合格」核验补建整改条目；
+  - `v4` 增加 `inbound`（导入收件箱）与 `ledger`（已应用台账）表，历史实体补 `rev / fieldRevs / syncBase`，路线段补 `state / stateReason / rebuiltAt`。
 - **localStorage**：点位登记表单草稿（`gbaccessmap-draft:point-new`）与 UI 偏好（`gbaccessmap-ui`）。
 - 首次打开时自动写入一批示例数据，便于直接体验。
 - 容器无状态：不使用数据库服务、不挂载命名卷，清空浏览器存储即可重置数据。
@@ -80,16 +82,32 @@ sologsb-1127/
     ├── tsconfig*.json
     ├── public/favicon.svg
     └── src/
-        ├── types/{point,inspection,route,rectify}.ts
+        ├── types/{point,inspection,route,rectify,sync}.ts
         ├── db/index.ts                     # Dexie 封装 + 版本迁移 + 示例数据
+        ├── sync/                           # 离线核验包：字段注册/三路合并/导入导出/事务应用
+        │   ├── fields.ts
+        │   ├── merge.ts
+        │   ├── package.ts
+        │   └── syncService.ts
         ├── stores/{pointStore,routeStore,uiStore}.ts
         ├── components/common/{MapPanel,StatusBadge,FacilityIcon,MeasureInput,EmptyState}.tsx
-        ├── hooks/{useAmapLoader,useInspectionFilter,useLocalDraft}.ts
-        ├── pages/{Overview,PointNew,PointDetail,Routes,MapView,Rectify}.tsx
+        ├── hooks/{useAmapLoader,useInspectionFilter,useLocalDraft,useSyncInbox}.ts
+        ├── pages/{Overview,PointNew,PointDetail,Routes,MapView,Rectify,SyncCenter}.tsx
         ├── layouts/AppLayout.tsx
         ├── router/index.tsx
         └── utils/{routeCheck,geo,format}.ts
 ```
+
+## 离线核验包（断网督导回传合并）
+
+现场督导员断网修改后，把回传的 `.gbapkg.json` 拖入「离线核验包」页面即可合入。规则：
+
+- **导出**：勾选点位后导出，自动附带这些点位的核验记录、整改条目及相邻路线段；每个实体携带修订号 `rev`、逐字段修订号 `fieldRevs` 和导出基线 `syncBase`。
+- **逐字段三路合并**：以导出基线为共同祖先。只有一边改过的字段采用改过的一边；两边都改过且取值不同则进入**并排裁决**（本机值 / 现场值二选一），未裁决前现场包不写入，晚到的一份不会覆盖早到的修改。无基线时按逐字段修订号取胜，修订号相同且不同同样需要裁决。
+- **点位不足先不写**：核验、整改、路线引用的点位若包内与本地都不存在，整包登记为「待重试」，不产生任何半批写入；导入过程中事务中断同样整体回滚、整包留待重试。
+- **幂等**：同一核验包（`packageId` 台账）只应用一次；同一核验（点位+日期+核验人+实测值指纹）重复回传只补一次。
+- **路线段即时失效重算**：最新核验结论或点位坐标变化后，相关路线段立即标记「失效」，旧全线结论不再显示，按最新端点核验结论（不合格阻断、限期整改警示）与逐段阈值重算后恢复；缺端点的路段补齐点位后才可重算。
+- 核心合并与重算为纯函数，`npm run selftest` 可离线运行 8 条规则自测。
 
 ## 判定阈值（`src/utils/routeCheck.ts`）
 

@@ -30,8 +30,10 @@ export const MAINTAIN_UNITS = [
   '城管委设施科',
 ] as const;
 
+import type { SyncedRecord } from './sync';
+
 /** 设施点位 */
-export interface AccessPoint {
+export interface AccessPoint extends SyncedRecord {
   id: string;
   /** 点位编号，例：WZ-2024-001 */
   code: string;
@@ -49,4 +51,4 @@ export interface AccessPoint {
   updatedAt: string;
 }
 
-export type AccessPointDraft = Omit<AccessPoint, 'id' | 'createdAt' | 'updatedAt'>;
+export type AccessPointDraft = Omit<AccessPoint, 'id' | 'createdAt' | 'updatedAt' | keyof SyncedRecord>;

@@ -1,3 +1,4 @@
+import type { AccessPoint } from '../types/point';
 import type { Inspection, InspectionConclusion, OccupiedLevel } from '../types/inspection';
 import type { RouteSegment, RouteVerdict } from '../types/route';
 
@@ -98,5 +99,162 @@ export function buildVerdict(
     totalSteps,
     maxCurbHeight,
     reasons: ordered.length === 0 ? ['尚未串联路段'] : reasons,
+    valid: true,
+    invalidCount: 0,
+    gateNotes: [],
   };
+}
+
+/** 取每个点位最新一条核验（按核验日期，同日按创建时间） */
+export function latestInspections(inspections: Inspection[]): Map<string, Inspection> {
+  const map = new Map<string, Inspection>();
+  for (const ins of inspections) {
+    const cur = map.get(ins.pointId);
+    if (!cur || cur.date < ins.date || (cur.date === ins.date && cur.createdAt < ins.createdAt)) {
+      map.set(ins.pointId, ins);
+    }
+  }
+  return map;
+}
+
+export interface SegRecalcInput {
+  id: string;
+  routeName: string;
+  fromPointId: string;
+  toPointId: string;
+  length: number;
+  obstacleCount: number;
+  stepCount: number;
+  curbHeight: number;
+  order: number;
+  state?: RouteSegment['state'];
+}
+
+export interface RecalculatedSegment {
+  id: string;
+  wheelchairPassable: boolean;
+  state: RouteSegment['state'];
+  stateReason: string;
+  gateNote: string;
+}
+
+/**
+ * 最新核验结论驱动的路线段重算：
+ * - 端点缺失 → 失效（几何信息不足），stateReason 记录原因
+ * - 端点最新结论「不合格」→ wheelchairPassable=false 阻断
+ * - 「限期整改」→ 警示但不阻断（gateNote）
+ * - 再叠加逐段障碍/台阶/高差判定；有效段重算通过后 state 恢复为「有效」
+ */
+export function recalcSegments(
+  segments: SegRecalcInput[],
+  points: Pick<AccessPoint, 'id' | 'name'>[],
+  inspections: Inspection[],
+): RecalculatedSegment[] {
+  const pointMap = new Map(points.map((p) => [p.id, p]));
+  const latest = latestInspections(inspections);
+
+  return segments.map((seg) => {
+    const from = pointMap.get(seg.fromPointId);
+    const to = pointMap.get(seg.toPointId);
+
+    if (!from || !to) {
+      const missing = [!from ? seg.fromPointId : '', !to ? seg.toPointId : ''].filter(Boolean);
+      const stateReason = `端点点位缺失（${missing.join('、')}），几何信息不足，等待补点后重试`;
+      return {
+        id: seg.id,
+        wheelchairPassable: false,
+        state: '失效' as const,
+        stateReason,
+        gateNote: stateReason,
+      };
+    }
+
+    const reasons: string[] = [];
+    const gateNotes: string[] = [];
+    for (const [role, p] of [
+      ['起点', from],
+      ['终点', to],
+    ] as const) {
+      const ins = latest.get(p.id);
+      if (!ins) {
+        gateNotes.push(`${role}「${p.name}」尚未核验`);
+      } else if (ins.conclusion === '不合格') {
+        reasons.push(`${role}「${p.name}」最新核验不合格（${ins.date}），禁止轮椅通行`);
+      } else if (ins.conclusion === '限期整改') {
+        gateNotes.push(`${role}「${p.name}」限期整改，通行需谨慎`);
+      }
+    }
+    reasons.push(...judgeSegment(seg).reasons);
+
+    return {
+      id: seg.id,
+      wheelchairPassable: reasons.length === 0,
+      state: '有效' as const,
+      stateReason: '',
+      gateNote: gateNotes.join('；'),
+    };
+  });
+}
+
+/**
+ * 按路线分组生成全线判定。任一段失效则该路线全线判定不可继续展示
+ * （valid=false 时 UI 不显示旧结论，只显示「已失效，等待重算」）。
+ */
+export function buildRouteVerdicts(
+  segments: RouteSegment[],
+  points: Pick<AccessPoint, 'id' | 'name'>[],
+  inspections: Inspection[],
+): Map<string, RouteVerdict> {
+  const byName = new Map<string, RouteSegment[]>();
+  for (const s of segments) {
+    const list = byName.get(s.routeName) ?? [];
+    list.push(s);
+    byName.set(s.routeName, list);
+  }
+
+  const recalced = recalcSegments(segments, points, inspections);
+  const recalcMap = new Map(recalced.map((r) => [r.id, r]));
+
+  const result = new Map<string, RouteVerdict>();
+  byName.forEach((list, name) => {
+    const ordered = [...list].sort((a, b) => a.order - b.order);
+    const totalLength = Math.round(ordered.reduce((n, s) => n + (Number(s.length) || 0), 0) * 10) / 10;
+    const totalObstacles = ordered.reduce((n, s) => n + (Number(s.obstacleCount) || 0), 0);
+    const totalSteps = ordered.reduce((n, s) => n + (Number(s.stepCount) || 0), 0);
+    const maxCurbHeight = ordered.reduce((n, s) => Math.max(n, Number(s.curbHeight) || 0), 0);
+
+    const reasons: string[] = [];
+    const gateNotes: string[] = [];
+    let invalidCount = 0;
+    let blocked = 0;
+    for (const s of ordered) {
+      const r = recalcMap.get(s.id);
+      if (!r) continue;
+      if (r.state === '失效') invalidCount += 1;
+      if (r.gateNote) gateNotes.push(r.gateNote);
+      if (!r.wheelchairPassable) {
+        blocked += 1;
+        if (r.state !== '失效') {
+          // 段自身障碍原因（不含端点点位缺失）
+          reasons.push(`第 ${s.order} 段：${judgeSegment(s).reasons.join('；')}`);
+          const insBlock = r.gateNote.includes('不合格');
+          if (insBlock) reasons.push(`第 ${s.order} 段：端点最新核验不合格，门控阻断`);
+        }
+      }
+    }
+
+    result.set(name, {
+      routeName: name,
+      passable: blocked === 0 && invalidCount === 0 && ordered.length > 0,
+      totalLength,
+      totalObstacles,
+      totalSteps,
+      maxCurbHeight,
+      reasons: Array.from(new Set(reasons)),
+      valid: invalidCount === 0 && ordered.length > 0,
+      invalidCount,
+      gateNotes: Array.from(new Set(gateNotes)),
+    });
+  });
+  return result;
 }

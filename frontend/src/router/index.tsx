@@ -6,6 +6,7 @@ import PointDetail from '../pages/PointDetail';
 import Routes from '../pages/Routes';
 import MapView from '../pages/MapView';
 import Rectify from '../pages/Rectify';
+import SyncCenter from '../pages/SyncCenter';
 
 export const router = createBrowserRouter([
   {
@@ -18,6 +19,7 @@ export const router = createBrowserRouter([
       { path: 'routes', element: <Routes /> },
       { path: 'map', element: <MapView /> },
       { path: 'rectify', element: <Rectify /> },
+      { path: 'sync', element: <SyncCenter /> },
       { path: '*', element: <Navigate to="/" replace /> },
     ],
   },
